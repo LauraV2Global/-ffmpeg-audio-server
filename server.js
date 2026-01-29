@@ -3,61 +3,76 @@ const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
 const cors = require('cors');
 const fs = require('fs');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 app.use(cors());
 
+const UPLOAD_DIR = '/tmp/uploads';
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
 const upload = multer({
-  dest: '/tmp/uploads/',
-  limits: { fileSize: 500 * 1024 * 1024 }
+  dest: UPLOAD_DIR,
+  limits: { fileSize: 500 * 1024 * 1024 },
 });
+
+// Health check simples
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.post('/process', upload.single('video'), async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ error: 'No video file provided' });
+    return res.status(400).json({ success: false, error: 'No video file provided' });
   }
 
   const inputPath = req.file.path;
-  const outputPath = `/tmp/output-${uuidv4()}.mp4`;
+  const outputPath = path.join('/tmp', `output-${uuidv4()}.mp4`);
+
+  // Seu filtro (sem pitch shift)
+  const audioFilter = 'pan=stereo|c0=c0|c1=-1*c0';
 
   try {
     await new Promise((resolve, reject) => {
-      ffmpeg(inputPath)                 // -i input.mp4
-        .audioFilters(
-          'pan=stereo|c0=c0|c1=-1*c0'   // -af "pan=stereo|c0=c0|c1=-1*c0"
-        )
-        .outputOptions(
-          '-c:v', 'copy'                // -c:v copy
-        )
-        .output(outputPath)             // output.mp4
-        .on('end', resolve)
-        .on('error', reject)
+      ffmpeg(inputPath)
+        .audioFilters(audioFilter)
+        .outputOptions('-c:v', 'copy')
+        .output(outputPath)
+        .on('start', (cmd) => {
+          console.log('FFmpeg command:', cmd);
+        })
+        .on('end', () => {
+          console.log('FFmpeg OK. Filtro aplicado:', audioFilter);
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error('FFmpeg ERROR:', err);
+          reject(err);
+        })
         .run();
     });
 
     const processedVideo = fs.readFileSync(outputPath);
     const base64Video = processedVideo.toString('base64');
 
+    // cleanup
     fs.unlinkSync(inputPath);
     fs.unlinkSync(outputPath);
 
-    res.json({
+    return res.json({
       success: true,
-      processedVideoBase64: base64Video
+      processedVideoBase64: base64Video,
+      filterApplied: audioFilter, // <- agora o frontend vai mostrar isso
     });
-
   } catch (error) {
     if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
     if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      error: error.message
+      error: error?.message || 'Unknown error',
     });
   }
 });
 
-app.listen(3000, () => {
-  console.log('FFmpeg server running on port 3000');
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`FFmpeg server running on port ${PORT}`));
